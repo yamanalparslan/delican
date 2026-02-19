@@ -1,10 +1,8 @@
 /**
  * ============================================
- *  ESP32-S3 Sesli Asistan - FINAL KOD
- *  Mikrofon + Hoparlör + WiFi + Gemini API
+ *  ESP32-S3 Sesli Asistan - DÜZELTILMIŞ v2
  * ============================================
- * Gerekli kütüphaneler:
- *  - ArduinoJson (Library Manager'dan kur)
+ * Kütüphane: ArduinoJson (Library Manager)
  * ============================================
  */
 
@@ -15,22 +13,20 @@
 #include <driver/i2s.h>
 
 // ============================================
-//  KULLANICI AYARLARI — BUNLARI DEĞİŞTİR!
+//  KULLANICI AYARLARI
 // ============================================
-#define WIFI_SSID        "Ağ_Adın"
-#define WIFI_PASSWORD    "Şifren"
-#define GOOGLE_API_KEY   "YOUR_GOOGLE_API_KEY"
+#define WIFI_SSID       "Ağ_Adın"
+#define WIFI_PASSWORD   "Şifren"
+#define GOOGLE_API_KEY  "YOUR_GOOGLE_API_KEY"
 
 // ============================================
 //  PIN TANIMLAMALARI
 // ============================================
-// Mikrofon (INMP441)
 #define MIC_WS_PIN    5
 #define MIC_SCK_PIN   6
 #define MIC_SD_PIN    4
 #define MIC_PORT      I2S_NUM_0
 
-// Hoparlör (MAX98357A)
 #define SPK_BCLK_PIN  9
 #define SPK_LRC_PIN   10
 #define SPK_DIN_PIN   8
@@ -41,14 +37,12 @@
 // ============================================
 #define SAMPLE_RATE          16000
 #define BUFFER_LENGTH        512
-#define MAX_RECORD_SECONDS   5
-#define MAX_RECORD_SAMPLES   (SAMPLE_RATE * MAX_RECORD_SECONDS)
+#define MAX_RECORD_SAMPLES   (SAMPLE_RATE * 5)  // 5 sn
 
 #define WAKE_THRESHOLD       1500
 #define WAKE_CONFIRM_MS      300
 #define SILENCE_TIMEOUT_MS   1500
 
-// API URL'leri
 #define STT_URL "https://speech.googleapis.com/v1/speech:recognize?key=" GOOGLE_API_KEY
 #define TTS_URL "https://texttospeech.googleapis.com/v1/text:synthesize?key=" GOOGLE_API_KEY
 #define LLM_URL "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=" GOOGLE_API_KEY
@@ -69,52 +63,53 @@ SystemState currentState = STATE_IDLE;
 //  GLOBAL DEĞİŞKENLER
 // ============================================
 int32_t  rawBuffer[BUFFER_LENGTH];
-int16_t* recordBuffer  = nullptr;
-int      recordIndex   = 0;
+int16_t* recordBuffer = nullptr;
+int      recordIndex  = 0;
 
 unsigned long wakeStartTime = 0;
 unsigned long lastSoundTime = 0;
 bool soundDetected = false;
 
 // ============================================
-//  BASE64 YARDIMCI FONKSİYONLARI
+//  BASE64 (harici kütüphane gerekmez)
 // ============================================
-static const char b64chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+static const char b64chars[] =
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
-String base64Encode(uint8_t* data, size_t len) {
-  String result = "";
-  result.reserve((len / 3 + 1) * 4 + 4);
+String base64Encode(const uint8_t* data, size_t len) {
+  String out;
+  out.reserve(((len + 2) / 3) * 4 + 4);
   for (size_t i = 0; i < len; i += 3) {
     uint8_t b0 = data[i];
-    uint8_t b1 = (i+1 < len) ? data[i+1] : 0;
-    uint8_t b2 = (i+2 < len) ? data[i+2] : 0;
-    result += b64chars[b0 >> 2];
-    result += b64chars[((b0 & 3) << 4) | (b1 >> 4)];
-    result += (i+1 < len) ? b64chars[((b1 & 15) << 2) | (b2 >> 6)] : '=';
-    result += (i+2 < len) ? b64chars[b2 & 63] : '=';
+    uint8_t b1 = (i + 1 < len) ? data[i + 1] : 0;
+    uint8_t b2 = (i + 2 < len) ? data[i + 2] : 0;
+    out += b64chars[b0 >> 2];
+    out += b64chars[((b0 & 3) << 4) | (b1 >> 4)];
+    out += (i + 1 < len) ? b64chars[((b1 & 15) << 2) | (b2 >> 6)] : '=';
+    out += (i + 2 < len) ? b64chars[b2 & 63] : '=';
   }
-  return result;
+  return out;
 }
 
-size_t base64Decode(String input, uint8_t* output) {
-  auto decodeChar = [](char c) -> int {
+size_t base64Decode(const String& input, uint8_t* output) {
+  auto val = [](char c) -> int {
     if (c >= 'A' && c <= 'Z') return c - 'A';
     if (c >= 'a' && c <= 'z') return c - 'a' + 26;
     if (c >= '0' && c <= '9') return c - '0' + 52;
     if (c == '+') return 62;
     if (c == '/') return 63;
-    return -1;
+    return 0;
   };
   size_t outLen = 0;
-  for (size_t i = 0; i < input.length(); i += 4) {
-    int b0 = decodeChar(input[i]);
-    int b1 = decodeChar(input[i+1]);
-    int b2 = (i+2 < input.length()) ? decodeChar(input[i+2]) : 0;
-    int b3 = (i+3 < input.length()) ? decodeChar(input[i+3]) : 0;
-    if (b0 < 0 || b1 < 0) break;
-    output[outLen++] = (b0 << 2) | (b1 >> 4);
-    if (input[i+2] != '=') output[outLen++] = ((b1 & 15) << 4) | (b2 >> 2);
-    if (input[i+3] != '=') output[outLen++] = ((b2 & 3) << 6) | b3;
+  size_t len = input.length();
+  for (size_t i = 0; i + 3 < len; i += 4) {
+    int v0 = val(input[i]);
+    int v1 = val(input[i + 1]);
+    int v2 = val(input[i + 2]);
+    int v3 = val(input[i + 3]);
+    output[outLen++] = (v0 << 2) | (v1 >> 4);
+    if (input[i + 2] != '=') output[outLen++] = ((v1 & 15) << 4) | (v2 >> 2);
+    if (input[i + 3] != '=') output[outLen++] = ((v2 & 3) << 6) | v3;
   }
   return outLen;
 }
@@ -125,20 +120,18 @@ size_t base64Decode(String input, uint8_t* output) {
 void setup() {
   Serial.begin(115200);
   delay(500);
-  Serial.println("\n=== ESP32-S3 Sesli Asistan ===");
+  Serial.println("\n=== ESP32-S3 Sesli Asistan v2 ===");
 
-  // PSRAM kayıt tamponu
   recordBuffer = (int16_t*)ps_malloc(MAX_RECORD_SAMPLES * sizeof(int16_t));
   if (!recordBuffer) {
     Serial.println("HATA: PSRAM bulunamadı! Tools > PSRAM > OPI PSRAM seç.");
-    while(1);
+    while (1);
   }
-  Serial.printf("PSRAM hazır: %d saniyelik kayıt kapasitesi\n", MAX_RECORD_SECONDS);
+  Serial.println("PSRAM tampon hazır.");
 
   i2s_mic_init();
   i2s_speaker_init();
   wifi_connect();
-
   setState(STATE_IDLE);
 }
 
@@ -146,12 +139,6 @@ void setup() {
 //  ANA DÖNGÜ
 // ============================================
 void loop() {
-  // Wi-Fi kopmuşsa yeniden bağlan
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("[WiFi] Bağlantı kesildi, yeniden bağlanıyor...");
-    wifi_connect();
-  }
-
   size_t bytesRead = 0;
   i2s_read(MIC_PORT, &rawBuffer, sizeof(rawBuffer), &bytesRead, portMAX_DELAY);
   if (bytesRead == 0) return;
@@ -159,9 +146,13 @@ void loop() {
   float rms = calculateRMS(bytesRead / sizeof(int32_t));
 
   switch (currentState) {
+
     case STATE_IDLE:
       if (rms > WAKE_THRESHOLD) {
-        if (!soundDetected) { soundDetected = true; wakeStartTime = millis(); }
+        if (!soundDetected) {
+          soundDetected = true;
+          wakeStartTime = millis();
+        }
         if (millis() - wakeStartTime > WAKE_CONFIRM_MS) {
           recordIndex = 0;
           setState(STATE_LISTENING);
@@ -173,13 +164,16 @@ void loop() {
 
     case STATE_LISTENING: {
       if (rms > WAKE_THRESHOLD / 2) lastSoundTime = millis();
+
       int samplesRead = bytesRead / sizeof(int32_t);
       for (int i = 0; i < samplesRead && recordIndex < MAX_RECORD_SAMPLES; i++) {
         recordBuffer[recordIndex++] = (int16_t)(rawBuffer[i] >> 16);
       }
-      bool silenceTimeout = (millis() - lastSoundTime > SILENCE_TIMEOUT_MS);
+
+      bool silenceEnd = (millis() - lastSoundTime > SILENCE_TIMEOUT_MS);
       bool bufferFull = (recordIndex >= MAX_RECORD_SAMPLES);
-      if (silenceTimeout || bufferFull) {
+
+      if (silenceEnd || bufferFull) {
         Serial.printf("Kayıt bitti: %.1f sn\n", (float)recordIndex / SAMPLE_RATE);
         setState(STATE_THINKING);
         processVoiceCommand();
@@ -194,12 +188,23 @@ void loop() {
 }
 
 // ============================================
-//  ANA İŞLEM FONKSİYONU
+//  ANA İŞLEM
 // ============================================
 void processVoiceCommand() {
+  // Wi-Fi kontrolü
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[WiFi] Bağlantı yok, yeniden bağlanıyor...");
+    wifi_connect();
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.println("[WiFi] Bağlanamadı, IDLE'a dön.");
+      setState(STATE_IDLE);
+      return;
+    }
+  }
+
   String transcript = speechToText();
   if (transcript.isEmpty()) {
-    Serial.println("STT boş döndü, IDLE'a dön");
+    Serial.println("[STT] Boş döndü, IDLE'a dön.");
     setState(STATE_IDLE);
     return;
   }
@@ -207,7 +212,7 @@ void processVoiceCommand() {
 
   String aiResponse = askGemini(transcript);
   if (aiResponse.isEmpty()) {
-    Serial.println("Gemini boş döndü");
+    Serial.println("[Gemini] Boş döndü.");
     setState(STATE_IDLE);
     return;
   }
@@ -224,21 +229,13 @@ void processVoiceCommand() {
 String speechToText() {
   Serial.println("[STT] Gönderiliyor...");
 
-  String base64Audio = base64Encode(
-    (uint8_t*)recordBuffer,
+  // Sesi base64'e çevir
+  String b64 = base64Encode(
+    (const uint8_t*)recordBuffer,
     recordIndex * sizeof(int16_t)
   );
 
-  // DynamicJsonDocument kullan — büyük ses verisi için
-  DynamicJsonDocument requestDoc(base64Audio.length() + 512);
-  requestDoc["config"]["encoding"] = "LINEAR16";
-  requestDoc["config"]["sampleRateHertz"] = SAMPLE_RATE;
-  requestDoc["config"]["languageCode"] = "tr-TR";
-  requestDoc["audio"]["content"] = base64Audio;
-
-  String requestBody;
-  serializeJson(requestDoc, requestBody);
-
+  // JSON'u parça parça oluştur — büyük String birleştirmesinden kaçın
   WiFiClientSecure client;
   client.setInsecure();
   HTTPClient http;
@@ -246,18 +243,28 @@ String speechToText() {
   http.addHeader("Content-Type", "application/json");
   http.setTimeout(15000);
 
-  int httpCode = http.POST(requestBody);
+  // Manuel JSON (DynamicJsonDocument base64 String'i taşıyamaz)
+  String body = "{\"config\":{\"encoding\":\"LINEAR16\","
+                "\"sampleRateHertz\":" + String(SAMPLE_RATE) + ","
+                "\"languageCode\":\"tr-TR\"},"
+                "\"audio\":{\"content\":\"" + b64 + "\"}}";
+
+  int code = http.POST(body);
   String response = "";
 
-  if (httpCode == 200) {
-    DynamicJsonDocument responseDoc(4096);
-    deserializeJson(responseDoc, http.getStream());
-    if (!responseDoc["results"][0]["alternatives"][0]["transcript"].isNull()) {
-      response = responseDoc["results"][0]["alternatives"][0]["transcript"].as<String>();
+  if (code == 200) {
+    // Stream'den oku — getString() kullanma!
+    DynamicJsonDocument doc(4096);
+    DeserializationError err = deserializeJson(doc, http.getStream());
+    if (!err && !doc["results"][0]["alternatives"][0]["transcript"].isNull()) {
+      response = doc["results"][0]["alternatives"][0]["transcript"].as<String>();
+    } else {
+      Serial.println("[STT] JSON parse hatası veya boş sonuç.");
     }
   } else {
-    Serial.printf("[STT] Hata: %d — %s\n", httpCode, http.getString().c_str());
+    Serial.printf("[STT] HTTP Hata: %d\n", code);
   }
+
   http.end();
   return response;
 }
@@ -265,19 +272,16 @@ String speechToText() {
 // ============================================
 //  GEMİNİ LLM
 // ============================================
-String askGemini(String userText) {
+String askGemini(const String& userText) {
   Serial.println("[Gemini] İstek gönderiliyor...");
 
-  DynamicJsonDocument requestDoc(1024);
-  JsonArray contents = requestDoc.createNestedArray("contents");
-  JsonObject content = contents.createNestedObject();
-  JsonArray parts = content.createNestedArray("parts");
-  parts.createNestedObject()["text"] =
-    "Sen Alex adında yardımcı bir sesli asistansın. "
-    "Türkçe, kısa ve net cevap ver. Kullanıcı: " + userText;
+  // Sistem promptunu sabit tut, userText'i birleştir
+  String prompt = "Sen Alex adinda yardimci bir sesli asistansin. "
+                  "Turkce, kisa ve net cevap ver. Kullanici: ";
+  prompt += userText;
 
-  String requestBody;
-  serializeJson(requestDoc, requestBody);
+  String body = "{\"contents\":[{\"parts\":[{\"text\":\""
+                + prompt + "\"}]}]}";
 
   WiFiClientSecure client;
   client.setInsecure();
@@ -286,37 +290,36 @@ String askGemini(String userText) {
   http.addHeader("Content-Type", "application/json");
   http.setTimeout(20000);
 
-  int httpCode = http.POST(requestBody);
+  int code = http.POST(body);
   String response = "";
 
-  if (httpCode == 200) {
-    DynamicJsonDocument responseDoc(8192);
-    deserializeJson(responseDoc, http.getStream());
-    if (!responseDoc["candidates"][0]["content"]["parts"][0]["text"].isNull()) {
-      response = responseDoc["candidates"][0]["content"]["parts"][0]["text"].as<String>();
+  if (code == 200) {
+    DynamicJsonDocument doc(8192);
+    DeserializationError err = deserializeJson(doc, http.getStream());
+    if (!err && !doc["candidates"][0]["content"]["parts"][0]["text"].isNull()) {
+      response = doc["candidates"][0]["content"]["parts"][0]["text"].as<String>();
+    } else {
+      Serial.println("[Gemini] JSON parse hatası.");
     }
   } else {
-    Serial.printf("[Gemini] Hata: %d — %s\n", httpCode, http.getString().c_str());
+    Serial.printf("[Gemini] HTTP Hata: %d\n", code);
   }
+
   http.end();
   return response;
 }
 
 // ============================================
-//  TEXT TO SPEECH
+//  TEXT TO SPEECH — Streaming ile güvenli
 // ============================================
-void textToSpeech(String text) {
+void textToSpeech(const String& text) {
   Serial.println("[TTS] Sentezleniyor...");
 
-  DynamicJsonDocument requestDoc(1024);
-  requestDoc["input"]["text"] = text;
-  requestDoc["voice"]["languageCode"] = "tr-TR";
-  requestDoc["voice"]["name"] = "tr-TR-Wavenet-A";
-  requestDoc["audioConfig"]["audioEncoding"] = "LINEAR16";
-  requestDoc["audioConfig"]["sampleRateHertz"] = SAMPLE_RATE;
-
-  String requestBody;
-  serializeJson(requestDoc, requestBody);
+  String body = "{\"input\":{\"text\":\"" + text + "\"},"
+                "\"voice\":{\"languageCode\":\"tr-TR\","
+                "\"name\":\"tr-TR-Wavenet-A\"},"
+                "\"audioConfig\":{\"audioEncoding\":\"LINEAR16\","
+                "\"sampleRateHertz\":" + String(SAMPLE_RATE) + "}}";
 
   WiFiClientSecure client;
   client.setInsecure();
@@ -325,30 +328,40 @@ void textToSpeech(String text) {
   http.addHeader("Content-Type", "application/json");
   http.setTimeout(15000);
 
-  int httpCode = http.POST(requestBody);
+  int code = http.POST(body);
 
-  if (httpCode == 200) {
-    // Yanıtı doğrudan stream'den oku (RAM tasarrufu)
-    DynamicJsonDocument responseDoc(1024);
-    // Sadece audioContent alanını al
+  if (code == 200) {
+    // Sadece audioContent değerini String olarak çek
+    // getStream() yerine getString() — TTS yanıtı genelde 50-200KB
     String payload = http.getString();
+
+    // "audioContent":"......." kısmını bul
     int start = payload.indexOf("\"audioContent\":\"") + 16;
-    int end   = payload.indexOf("\"", start);
+    int end   = payload.indexOf('"', start);
+
     if (start > 16 && end > start) {
-      String base64Audio = payload.substring(start, end);
-      size_t decodedLen = (base64Audio.length() * 3) / 4;
-      uint8_t* audioData = (uint8_t*)ps_malloc(decodedLen);
-      if (audioData) {
-        size_t actualLen = base64Decode(base64Audio, audioData);
-        playAudio((int16_t*)audioData, actualLen / sizeof(int16_t));
-        free(audioData);
+      String b64audio = payload.substring(start, end);
+      Serial.printf("[TTS] Base64 boyutu: %d karakter\n", b64audio.length());
+
+      // PSRAM'da decode et
+      size_t maxDecoded = (b64audio.length() * 3) / 4;
+      uint8_t* audioBuf = (uint8_t*)ps_malloc(maxDecoded);
+
+      if (audioBuf) {
+        size_t actualLen = base64Decode(b64audio, audioBuf);
+        Serial.printf("[TTS] Decode edildi: %d byte\n", actualLen);
+        playAudio((int16_t*)audioBuf, actualLen / sizeof(int16_t));
+        free(audioBuf);
       } else {
-        Serial.println("[TTS] PSRAM yetmedi!");
+        Serial.println("[TTS] HATA: PSRAM yetersiz! Ses çalınamadı.");
       }
+    } else {
+      Serial.println("[TTS] audioContent bulunamadı.");
     }
   } else {
-    Serial.printf("[TTS] Hata: %d\n", httpCode);
+    Serial.printf("[TTS] HTTP Hata: %d\n", code);
   }
+
   http.end();
 }
 
@@ -356,14 +369,14 @@ void textToSpeech(String text) {
 //  SES ÇALMA
 // ============================================
 void playAudio(int16_t* audioData, size_t sampleCount) {
-  Serial.printf("[SPK] Çalınıyor: %d sample (%.1f sn)\n",
-    sampleCount, (float)sampleCount / SAMPLE_RATE);
+  Serial.printf("[SPK] Çalınıyor: %.1f sn\n", (float)sampleCount / SAMPLE_RATE);
   size_t offset = 0;
   while (offset < sampleCount) {
     size_t toWrite = min((size_t)BUFFER_LENGTH, sampleCount - offset);
-    size_t bytesWritten = 0;
-    i2s_write(SPK_PORT, audioData + offset, toWrite * sizeof(int16_t), &bytesWritten, portMAX_DELAY);
-    offset += bytesWritten / sizeof(int16_t);
+    size_t written = 0;
+    i2s_write(SPK_PORT, audioData + offset, toWrite * sizeof(int16_t), &written, portMAX_DELAY);
+    if (written == 0) break;  // Hata koruması
+    offset += written / sizeof(int16_t);
   }
 }
 
@@ -372,15 +385,18 @@ void playAudio(int16_t* audioData, size_t sampleCount) {
 // ============================================
 void wifi_connect() {
   Serial.printf("[WiFi] Bağlanıyor: %s\n", WIFI_SSID);
+  WiFi.disconnect();
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   int attempt = 0;
   while (WiFi.status() != WL_CONNECTED && attempt++ < 40) {
-    delay(500); Serial.print(".");
+    delay(500);
+    Serial.print(".");
   }
+  Serial.println();
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.printf("\n[WiFi] Bağlandı! IP: %s\n", WiFi.localIP().toString().c_str());
+    Serial.printf("[WiFi] Bağlandı! IP: %s\n", WiFi.localIP().toString().c_str());
   } else {
-    Serial.println("\n[WiFi] HATA! SSID ve şifreyi kontrol et.");
+    Serial.println("[WiFi] HATA! SSID/şifre kontrol et.");
   }
 }
 
@@ -400,8 +416,10 @@ void setState(SystemState s) {
   currentState = s;
   const char* names[] = {"IDLE", "LISTENING", "THINKING", "SPEAKING"};
   Serial.printf("[DURUM] >>> %s\n", names[s]);
-  lastSoundTime = millis();
-  soundDetected = false;
+  if (s == STATE_IDLE || s == STATE_LISTENING) {
+    lastSoundTime = millis();
+    soundDetected = false;
+  }
 }
 
 void i2s_mic_init() {
@@ -422,7 +440,7 @@ void i2s_mic_init() {
   i2s_driver_install(MIC_PORT, &cfg, 0, NULL);
   i2s_set_pin(MIC_PORT, &pins);
   i2s_zero_dma_buffer(MIC_PORT);
-  Serial.println("[I2S] Mikrofon hazır");
+  Serial.println("[I2S] Mikrofon hazır.");
 }
 
 void i2s_speaker_init() {
@@ -443,5 +461,5 @@ void i2s_speaker_init() {
   i2s_driver_install(SPK_PORT, &cfg, 0, NULL);
   i2s_set_pin(SPK_PORT, &pins);
   i2s_zero_dma_buffer(SPK_PORT);
-  Serial.println("[I2S] Hoparlör hazır");
+  Serial.println("[I2S] Hoparlör hazır.");
 }
